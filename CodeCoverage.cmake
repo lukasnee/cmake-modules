@@ -87,6 +87,19 @@
 #     - fix append_coverage_compiler_flags_to_target to correctly add flags
 #     - replace "-fprofile-arcs -ftest-coverage" with "--coverage" (equivalent)
 #
+# 2024-01-23, Lukas Neverauskis
+#     - Fix: COVERAGE_EXCLUDES variable or EXCLUDE arguments do not work with
+#       gcovr (CMake 3.4+) if project is built in a directory where the absolute
+#       path contains special regex characters like '(' or ')', etc. (e.g.
+#       "C:/Program Files (x86)/...") even if BASE_DIRECTORY argument is unset
+#       or set to a relative path. See `literal_to_regex` for details.
+#     - Clarify COVERAGE_EXCLUDES variable and EXCLUDE arguments description and
+#       usage.
+#     - Ignore resource (RC) CMake LANG during validation.
+#     - Fix empty command (`COMMAND ;`) warnings. Simply use `echo` command
+#       rather than empty COMMAND with a COMMENT. `echo` is portable between
+#       bash and Windows Cmd.
+#
 # USAGE:
 #
 # 1. Copy this file into your cmake modules path.
@@ -118,13 +131,22 @@
 #
 # 4.a NOTE: With CMake 3.4+, COVERAGE_EXCLUDES or EXCLUDE can also be set
 #     relative to the BASE_DIRECTORY (default: PROJECT_SOURCE_DIR)
-#     Example:
+#     ATTENTION!: With gcovr, COVERAGE_EXCLUDES and EXCLUDE are regular 
+#     expressions, NOT wildcard patterns!
+#     lcov example:
 #       set(COVERAGE_EXCLUDES "dir1/*")
 #       setup_target_for_coverage_gcovr_html(
 #           NAME coverage
 #           EXECUTABLE testrunner
 #           BASE_DIRECTORY "${PROJECT_SOURCE_DIR}/src"
 #           EXCLUDE "dir2/*")
+#     gcovr example:
+#       set(COVERAGE_EXCLUDES "build\/.*" "tests" "src\/.*UnitTests.*")
+#       setup_target_for_coverage_gcovr_html(
+#           NAME coverage
+#           EXECUTABLE testrunner
+#           BASE_DIRECTORY "${PROJECT_SOURCE_DIR}/src"
+#           EXCLUDE "build\/.*" "tests" "src\/.*UnitTests.*")
 #
 # 5. Use the functions described below to create a custom make target which
 #    runs your test executable and produces a code coverage report.
@@ -146,6 +168,7 @@ find_program( FASTCOV_PATH NAMES fastcov fastcov.py )
 find_program( GENHTML_PATH NAMES genhtml genhtml.perl genhtml.bat )
 find_program( GCOVR_PATH gcovr PATHS ${CMAKE_SOURCE_DIR}/scripts/test)
 find_program( CPPFILT_PATH NAMES c++filt )
+find_program( PYTHON_PATH NAMES python3 python )
 
 if(NOT GCOV_PATH)
     message(FATAL_ERROR "gcov not found! Aborting...")
@@ -154,6 +177,9 @@ endif() # NOT GCOV_PATH
 # Check supported compiler (Clang, GNU and Flang)
 get_property(LANGUAGES GLOBAL PROPERTY ENABLED_LANGUAGES)
 foreach(LANG ${LANGUAGES})
+  if(${LANG} STREQUAL "RC")
+    continue()
+  endif()
   if("${CMAKE_${LANG}_COMPILER_ID}" MATCHES "(Apple)?[Cc]lang")
     if("${CMAKE_${LANG}_COMPILER_VERSION}" VERSION_LESS 3)
       message(FATAL_ERROR "Clang version must be 3.0.0 or greater! Aborting...")
@@ -217,6 +243,17 @@ endif() # NOT (CMAKE_BUILD_TYPE STREQUAL "Debug" OR GENERATOR_IS_MULTI_CONFIG)
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
     link_libraries(gcov)
 endif()
+
+function(literal_to_regex input_literal output_literal)
+    message(DEBUG "literal_to_regex(\"${input_literal}\")")
+    execute_process(
+        COMMAND ${PYTHON_PATH} -c "import re; print(re.escape('${input_literal}'))"
+        OUTPUT_VARIABLE escaped_path
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    message(DEBUG "literal_to_regex: ${escaped_path}")
+    set(${output_literal} "${escaped_path}" PARENT_SCOPE)
+endfunction()
 
 # Defines a target for running and collection code coverage information
 # Builds dependencies, runs the given executable and outputs reports.
@@ -384,15 +421,12 @@ function(setup_target_for_coverage_lcov)
 
     # Show where to find the lcov info report
     add_custom_command(TARGET ${Coverage_NAME} POST_BUILD
-        COMMAND ;
-        COMMENT "Lcov code coverage info report saved in ${Coverage_NAME}.info."
-        ${GCOVR_XML_CMD_COMMENT}
+        COMMAND echo Lcov code coverage info report saved in ${Coverage_NAME}.info. ${GCOVR_XML_CMD_COMMENT}
     )
 
     # Show info where to find the report
     add_custom_command(TARGET ${Coverage_NAME} POST_BUILD
-        COMMAND ;
-        COMMENT "Open ./${Coverage_NAME}/index.html in your browser to view the coverage report."
+        COMMAND echo Open ${PROJECT_BINARY_DIR}/${Coverage_NAME}/index.html in your browser to view the coverage report.
     )
 
 endfunction() # setup_target_for_coverage_lcov
@@ -435,7 +469,9 @@ function(setup_target_for_coverage_gcovr_xml)
     set(GCOVR_EXCLUDES "")
     foreach(EXCLUDE ${Coverage_EXCLUDE} ${COVERAGE_EXCLUDES} ${COVERAGE_GCOVR_EXCLUDES})
         if(CMAKE_VERSION VERSION_GREATER 3.4)
-            get_filename_component(EXCLUDE ${EXCLUDE} ABSOLUTE BASE_DIR ${BASEDIR})
+            get_filename_component(BASEDIR_LITERAL_REGEX ${BASEDIR} ABSOLUTE)
+            literal_to_regex(${BASEDIR_LITERAL_REGEX} BASEDIR_LITERAL_REGEX)
+            set(EXCLUDE "${BASEDIR_LITERAL_REGEX}/${EXCLUDE}")
         endif()
         list(APPEND GCOVR_EXCLUDES "${EXCLUDE}")
     endforeach()
@@ -484,8 +520,7 @@ function(setup_target_for_coverage_gcovr_xml)
 
     # Show info where to find the report
     add_custom_command(TARGET ${Coverage_NAME} POST_BUILD
-        COMMAND ;
-        COMMENT "Cobertura code coverage report saved in ${Coverage_NAME}.xml."
+        COMMAND echo Cobertura code coverage report saved in ${PROJECT_BINARY_DIR}/${Coverage_NAME}.xml.
     )
 endfunction() # setup_target_for_coverage_gcovr_xml
 
@@ -527,7 +562,9 @@ function(setup_target_for_coverage_gcovr_html)
     set(GCOVR_EXCLUDES "")
     foreach(EXCLUDE ${Coverage_EXCLUDE} ${COVERAGE_EXCLUDES} ${COVERAGE_GCOVR_EXCLUDES})
         if(CMAKE_VERSION VERSION_GREATER 3.4)
-            get_filename_component(EXCLUDE ${EXCLUDE} ABSOLUTE BASE_DIR ${BASEDIR})
+            get_filename_component(BASEDIR_LITERAL_REGEX ${BASEDIR} ABSOLUTE)
+            literal_to_regex(${BASEDIR_LITERAL_REGEX} BASEDIR_LITERAL_REGEX)
+            set(EXCLUDE "${BASEDIR_LITERAL_REGEX}/${EXCLUDE}")
         endif()
         list(APPEND GCOVR_EXCLUDES "${EXCLUDE}")
     endforeach()
@@ -585,8 +622,7 @@ function(setup_target_for_coverage_gcovr_html)
 
     # Show info where to find the report
     add_custom_command(TARGET ${Coverage_NAME} POST_BUILD
-        COMMAND ;
-        COMMENT "Open ./${Coverage_NAME}/index.html in your browser to view the coverage report."
+        COMMAND echo Open ${PROJECT_BINARY_DIR}/${Coverage_NAME}/index.html in your browser to view the coverage report.
     )
 
 endfunction() # setup_target_for_coverage_gcovr_html
